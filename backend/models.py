@@ -66,6 +66,12 @@ def _validar(dados):
     return descricao, valor, moeda, data
 
 
+def _obter_cotacao(moeda, data):
+    if moeda == "BRL":
+        return 1.0
+    return float(buscar_cotacao(moeda, data)["valor"])
+
+
 def criar_transacao(dados):
     """Valida os dados, busca a cotação da data da transação no módulo
     de câmbio e salva a transação já com cotacao_utilizada e
@@ -74,12 +80,7 @@ def criar_transacao(dados):
     Lança ValidacaoError (dados inválidos) ou CambioError (falha na cotação).
     """
     descricao, valor, moeda, data = _validar(dados)
-
-    if moeda == "BRL":
-        cotacao = 1.0
-    else:
-        cotacao = float(buscar_cotacao(moeda, data)["valor"])
-
+    cotacao = _obter_cotacao(moeda, data)
     valor_convertido_brl = round(valor * cotacao, 2)
 
     conexao = get_conexao()
@@ -96,11 +97,148 @@ def criar_transacao(dados):
     return buscar_transacao(novo_id)
 
 
-def listar_transacoes():
+def atualizar_transacao(transacao_id, dados):
+    """Substitui todos os campos de uma transação (semântica de PUT).
+
+    Se a moeda ou a data mudarem, busca a cotação de novo; senão mantém a
+    cotação já registrada. Retorna a transação atualizada, ou None se o id
+    não existir.
+    """
+    atual = buscar_transacao(transacao_id)
+    if atual is None:
+        return None
+
+    descricao, valor, moeda, data = _validar(dados)
+    if moeda == atual["moeda"] and data == atual["data"]:
+        cotacao = atual["cotacao_utilizada"]
+    else:
+        cotacao = _obter_cotacao(moeda, data)
+    valor_convertido_brl = round(valor * cotacao, 2)
+
     conexao = get_conexao()
-    linhas = conexao.execute("SELECT * FROM transacoes ORDER BY data DESC, id DESC").fetchall()
+    conexao.execute(
+        """
+        UPDATE transacoes
+        SET descricao = ?, valor = ?, moeda = ?, data = ?,
+            cotacao_utilizada = ?, valor_convertido_brl = ?
+        WHERE id = ?
+        """,
+        (descricao, valor, moeda, data, cotacao, valor_convertido_brl, transacao_id),
+    )
+    conexao.commit()
+    conexao.close()
+    return buscar_transacao(transacao_id)
+
+
+def excluir_transacao(transacao_id):
+    """Remove a transação. Retorna True se ela existia."""
+    conexao = get_conexao()
+    cursor = conexao.execute("DELETE FROM transacoes WHERE id = ?", (transacao_id,))
+    conexao.commit()
+    conexao.close()
+    return cursor.rowcount > 0
+
+
+# Campos pelos quais a listagem pode ser ordenada (?ordenar=...)
+CAMPOS_ORDENACAO = ("data", "valor", "valor_convertido_brl", "descricao", "moeda")
+
+
+def _montar_filtros(filtros):
+    """Traduz os filtros da query string em cláusula WHERE + parâmetros."""
+    condicoes, parametros = [], []
+
+    moeda = (filtros.get("moeda") or "").strip().upper()
+    if moeda:
+        condicoes.append("moeda = ?")
+        parametros.append(moeda)
+
+    for chave, operador in (("data_inicio", ">="), ("data_fim", "<=")):
+        valor = (filtros.get(chave) or "").strip()
+        if valor:
+            try:
+                datetime.strptime(valor, "%Y-%m-%d")
+            except ValueError:
+                raise ValidacaoError(f"O filtro '{chave}' deve estar no formato AAAA-MM-DD.")
+            condicoes.append(f"data {operador} ?")
+            parametros.append(valor)
+
+    busca = (filtros.get("busca") or "").strip()
+    if busca:
+        condicoes.append("descricao LIKE ?")
+        parametros.append(f"%{busca}%")
+
+    where = f"WHERE {' AND '.join(condicoes)}" if condicoes else ""
+    return where, parametros
+
+
+def listar_transacoes(filtros=None):
+    """Lista transações com filtros e ordenação opcionais.
+
+    filtros: moeda, data_inicio, data_fim, busca (trecho da descrição),
+    ordenar (um de CAMPOS_ORDENACAO, padrão data) e ordem (asc|desc, padrão desc).
+    """
+    filtros = filtros or {}
+    where, parametros = _montar_filtros(filtros)
+
+    ordenar = filtros.get("ordenar") or "data"
+    if ordenar not in CAMPOS_ORDENACAO:
+        raise ValidacaoError(
+            f"Não é possível ordenar por '{ordenar}'. Use: {', '.join(CAMPOS_ORDENACAO)}."
+        )
+    ordem = (filtros.get("ordem") or "desc").lower()
+    if ordem not in ("asc", "desc"):
+        raise ValidacaoError("O parâmetro 'ordem' deve ser 'asc' ou 'desc'.")
+
+    conexao = get_conexao()
+    linhas = conexao.execute(
+        # ordenar/ordem já foram validados contra listas fixas acima
+        f"SELECT * FROM transacoes {where} ORDER BY {ordenar} {ordem}, id {ordem}",
+        parametros,
+    ).fetchall()
     conexao.close()
     return [dict(linha) for linha in linhas]
+
+
+def resumir_transacoes(filtros=None):
+    """Totais gerais, por moeda e por mês (AAAA-MM), respeitando os filtros."""
+    where, parametros = _montar_filtros(filtros or {})
+    conexao = get_conexao()
+
+    geral = conexao.execute(
+        f"SELECT COUNT(*) AS quantidade, COALESCE(SUM(valor_convertido_brl), 0) AS total_brl "
+        f"FROM transacoes {where}",
+        parametros,
+    ).fetchone()
+    por_moeda = conexao.execute(
+        f"""
+        SELECT moeda, COUNT(*) AS quantidade, SUM(valor) AS total_original,
+               SUM(valor_convertido_brl) AS total_brl
+        FROM transacoes {where}
+        GROUP BY moeda ORDER BY total_brl DESC
+        """,
+        parametros,
+    ).fetchall()
+    por_mes = conexao.execute(
+        f"""
+        SELECT substr(data, 1, 7) AS mes, COUNT(*) AS quantidade,
+               SUM(valor_convertido_brl) AS total_brl
+        FROM transacoes {where}
+        GROUP BY mes ORDER BY mes
+        """,
+        parametros,
+    ).fetchall()
+    conexao.close()
+
+    return {
+        "quantidade": geral["quantidade"],
+        "total_brl": round(geral["total_brl"], 2),
+        "por_moeda": [
+            {**dict(linha), "total_original": round(linha["total_original"], 2),
+             "total_brl": round(linha["total_brl"], 2)}
+            for linha in por_moeda
+        ],
+        "por_mes": [{**dict(linha), "total_brl": round(linha["total_brl"], 2)} for linha in por_mes],
+    }
 
 
 def buscar_transacao(transacao_id):

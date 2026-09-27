@@ -1,21 +1,20 @@
 import { useState } from "react";
 import { hojeIso } from "../formatadores.js";
-
-const MOEDAS = [
-  ["USD", "Dólar americano"],
-  ["EUR", "Euro"],
-  ["GBP", "Libra esterlina"],
-  ["ARS", "Peso argentino"],
-  ["CAD", "Dólar canadense"],
-  ["JPY", "Iene japonês"],
-  ["CHF", "Franco suíço"],
-  ["BRL", "Real"],
-];
+import { MOEDAS } from "../moedas.js";
 
 const VAZIO = { descricao: "", valor: "", moeda: "USD", data: "" };
 
-export default function FormularioTransacao({ onCriar }) {
-  const [campos, setCampos] = useState(VAZIO);
+function camposIniciais(transacao) {
+  if (!transacao) return VAZIO;
+  const { descricao, valor, moeda, data } = transacao;
+  return { descricao, valor: String(valor), moeda, data };
+}
+
+// Serve para criar (sem `transacao`) e para editar (com `transacao`).
+// Quem usa deve passar key={transacao?.id} para reiniciar os campos ao trocar.
+export default function FormularioTransacao({ transacao, onSalvar, onCancelar }) {
+  const editando = Boolean(transacao);
+  const [campos, setCampos] = useState(() => camposIniciais(transacao));
   const [enviando, setEnviando] = useState(false);
   const [erro, setErro] = useState("");
 
@@ -29,8 +28,8 @@ export default function FormularioTransacao({ onCriar }) {
     setErro("");
     setEnviando(true);
     try {
-      await onCriar({ ...campos, valor: Number(campos.valor) });
-      setCampos(VAZIO);
+      await onSalvar({ ...campos, valor: Number(campos.valor) });
+      if (!editando) setCampos(VAZIO);
     } catch (e) {
       setErro(e.message);
     } finally {
@@ -39,8 +38,8 @@ export default function FormularioTransacao({ onCriar }) {
   }
 
   return (
-    <form className="cartao formulario" onSubmit={enviar}>
-      <h2>Nova despesa</h2>
+    <form className={`cartao formulario ${editando ? "editando" : ""}`} onSubmit={enviar}>
+      <h2>{editando ? `Editar despesa #${transacao.id}` : "Nova despesa"}</h2>
 
       <label>
         Descrição
@@ -98,9 +97,16 @@ export default function FormularioTransacao({ onCriar }) {
         </p>
       )}
 
-      <button type="submit" disabled={enviando}>
-        {enviando ? "Buscando cotação..." : "Cadastrar"}
-      </button>
+      <div className="acoes">
+        <button type="submit" disabled={enviando}>
+          {enviando ? "Buscando cotação..." : editando ? "Salvar alterações" : "Cadastrar"}
+        </button>
+        {editando && (
+          <button type="button" className="secundario" onClick={onCancelar} disabled={enviando}>
+            Cancelar
+          </button>
+        )}
+      </div>
     </form>
   );
 }

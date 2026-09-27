@@ -28,12 +28,33 @@ async function requisitar(caminho, opcoes = {}) {
   return corpo;
 }
 
-export function listarTransacoes() {
-  return requisitar("/transacoes");
+// Monta a query string ignorando filtros vazios
+function query(filtros = {}) {
+  const parametros = new URLSearchParams(
+    Object.entries(filtros).filter(([, valor]) => valor !== "" && valor != null)
+  ).toString();
+  return parametros ? `?${parametros}` : "";
+}
+
+export function listarTransacoes(filtros) {
+  return requisitar(`/transacoes${query(filtros)}`);
+}
+
+export function obterResumo(filtros) {
+  const { moeda, data_inicio, data_fim, busca } = filtros || {};
+  return requisitar(`/transacoes/resumo${query({ moeda, data_inicio, data_fim, busca })}`);
 }
 
 export function criarTransacao(dados) {
   return requisitar("/transacoes", { method: "POST", body: JSON.stringify(dados) });
+}
+
+export function atualizarTransacao(id, dados) {
+  return requisitar(`/transacoes/${id}`, { method: "PUT", body: JSON.stringify(dados) });
+}
+
+export function excluirTransacao(id) {
+  return requisitar(`/transacoes/${id}`, { method: "DELETE" });
 }
 
 export function compararTransacao(id) {
